@@ -1,0 +1,47 @@
+# 每次 push 與 pull request 自動跑測試：Linux 與 macOS、最舊與最新支援的 Python。
+# macOS 另外用系統內建的 /usr/bin/python3（管理畫面實際用的版本）跑一次，並實際執行 sandbox-exec。
+name: Tests
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    name: ${{ matrix.os }} / Python ${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            python: "3.9"
+          - os: ubuntu-latest
+            python: "3.12"
+          - os: macos-latest
+            python: "3.12"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Unit tests
+        run: python -m unittest discover -s tests -v
+
+  macos-system:
+    name: macOS / system Python + shell scripts
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Python version
+        run: /usr/bin/python3 --version
+      - name: Unit tests (includes real sandbox-exec tests)
+        run: /usr/bin/python3 -m unittest discover -s tests -v
+      - name: Shell syntax (macOS bash 3.2 and zsh)
+        run: |
+          /bin/bash --version | head -1
+          /bin/bash -n agents install.sh uninstall.sh agent-manager.sh
+          zsh -n agent-manager.sh

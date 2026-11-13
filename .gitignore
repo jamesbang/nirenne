@@ -1,0 +1,9 @@
+# Python
+__pycache__/
+*.pyc
+
+# macOS
+.DS_Store
+
+# install.sh 原子替換時的暫存檔
+*.tmp.*

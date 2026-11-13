@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+# 開啟（或接回）多 Agent 管理畫面
+PY="$HOME/.config/agent-manager/agents.py"
+SOCK="${AGENTS_TMUX_SOCKET:-agents}"
+# 查詢版本不啟動管理畫面，也不建立語系設定。
+if [ "${1:-}" = "--version" ] || [ "${1:-}" = "-v" ]; then
+  VERSION_FILE="$HOME/.config/agent-manager/VERSION"
+  # 原始碼目錄也可直接查詢版本。
+  SOURCE_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+  if [ -f "$SOURCE_DIR/agents.py" ] && [ -f "$SOURCE_DIR/VERSION" ]; then
+    VERSION_FILE="$SOURCE_DIR/VERSION"
+  fi
+  if [ -r "$VERSION_FILE" ]; then
+    IFS= read -r VERSION < "$VERSION_FILE"
+    printf 'nirenne %s\n' "$VERSION"
+    exit 0
+  fi
+  printf '%s\n' '找不到版本資訊，請重新安裝 nirenne。 / Version information is missing; reinstall nirenne.' >&2
+  exit 1
+fi
+# 介面語言（在冒險手冊按 g 切換）；還沒設定時依系統語系決定
+python3 -I "$PY" init-lang >/dev/null 2>&1
+if grep -qs '^UI_LANG=en$' "${AGENT_MANAGER_HOME:-$HOME/.agent-manager}/config"; then EN=1; else EN=""; fi
+say() { if [ -n "$EN" ]; then printf '%s\n' "$2"; else printf '%s\n' "$1"; fi; }
+# 正式名稱 nirenne，簡稱 agents（同一個程式）；提示訊息用使用者實際輸入的名稱
+ME="$(basename -- "$0")"
+case "$ME" in nirenne|agents) ;; *) ME=nirenne ;; esac
+
+case "${1:-}" in
+  stop)
+    tmux -L "$SOCK" has-session -t agents 2>/dev/null || { say "管理畫面沒有在執行。" "The manager is not running."; exit 0; }
+    read -r -p "$(say "這會結束管理畫面中所有的 Agent，確定嗎？(y/N) " "This ends every agent in the manager. Continue? (y/N) ")" a || a=""
+    # 全形、大寫都算（與管理畫面的確認用同一套判斷）
+    python3 -I "$PY" is-yes "$a" || { say "已取消。" "Cancelled."; exit 0; }
+    tmux -L "$SOCK" kill-server && say "已結束。" "Stopped."
+    # 組隊不會經過「解散」：刪除組隊時代為建立的空檔等
+    python3 -I "$PY" collab-cleanup >/dev/null 2>&1 || true
+    exit 0 ;;
+  -h|--help|help)
+    say "nirenne        開啟或接回管理畫面" "nirenne        open or reattach the manager"
+    say "nirenne stop   結束管理畫面與其中所有 Agent" "nirenne stop   stop the manager and every agent in it"
+    say "nirenne -v, --version  顯示版本" "nirenne -v, --version  show the version"
+    say "（也可以輸入較短的 agents，兩者完全相同）" "(the shorter agents works exactly the same)"
+    exit 0 ;;
+  "") ;;
+  *)
+    say "不支援的參數：$1。請使用 $ME --help 查看說明；查詢版本請輸入 $ME --version。" \
+        "Unsupported argument: $1. Use $ME --help for usage; use $ME --version to check the version." >&2
+    exit 1 ;;
+esac
+
+if [ -n "${TMUX:-}" ]; then
+  if [ "${AGENT_MANAGER_TMUX:-}" = "1" ] || [ "$(basename -- "${TMUX%%,*}" 2>/dev/null)" = "$SOCK" ]; then
+    say "你已經在管理畫面裡了。" "You are already inside the manager."
+  else
+    say "請勿在其他 tmux 內開啟管理畫面；請另開一般終端機分頁執行 $ME。" \
+        "Do not start the manager inside another tmux session; run $ME in a normal terminal tab."
+  fi
+  exit 1
+fi
+if ! command -v tmux >/dev/null; then
+  if [ "$(uname)" = "Darwin" ]; then say "找不到 tmux，請先執行：brew install tmux" "tmux not found; run: brew install tmux"
+  else say "找不到 tmux，請先執行：sudo apt install tmux" "tmux not found; run: sudo apt install tmux"; fi
+  exit 1
+fi
+
+# 避免把目前 shell 殘留的 Session 變數帶進管理畫面
+unset AGENT_SESSION_ID AGENT_SESSION_FILE AGENT_PROJECT AGENT_NAME AGENT_MANAGER_TMUX NIRENNE_IN_AGENT NIRENNE_AGENT_LEVEL NIRENNE_TMUX_PROXY
+tmux -L "$SOCK" has-session -t agents 2>/dev/null || python3 -I "$PY" start || exit 1
+exec tmux -L "$SOCK" attach -t agents
