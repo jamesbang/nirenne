@@ -4,6 +4,18 @@
 
 Version numbers use the `major.minor.patch` format. Fixes increase the patch number and new features increase the minor number. Incompatible changes are listed in that version's update notes. While the version is `0.x`, features and controls may still change.
 
+## 0.2.0 — 2026-11-24
+
+### Copying long output
+
+- New "Copy reply" in an agent's right-click menu (Claude, Codex, Grok and Antigravity): copy the latest reply, or one of its code blocks, as the original text. Use ←→ for earlier replies. To copy just part of it, drag in the preview, or click the first line and then the last. The window stays open so you can copy several parts; Esc closes it.
+- After copying, "✅ Copied N lines to the clipboard" shows at the bottom right.
+
+### Install and update
+
+- No restart needed after updating: the right-click menu, keys and status bar switch to the new version right away, and your agents keep running.
+- Fixed: installation stopped partway when another command with the same name was already on the computer.
+
 ## 0.1.0 — 2026-11-13
 
 Initial release.

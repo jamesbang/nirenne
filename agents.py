@@ -20,6 +20,7 @@
 import contextlib
 import curses
 import fcntl
+import glob
 import hashlib
 import json
 import random
@@ -36,6 +37,7 @@ import threading
 import sys
 import time
 import unicodedata
+import urllib.parse
 
 HOME = os.path.expanduser("~")
 MGR_HOME = os.environ.get("AGENT_MANAGER_HOME", os.path.join(HOME, ".agent-manager"))
@@ -219,6 +221,34 @@ STRINGS = {
     "menu_talk": ("隊伍傳話", "Party messages"),
     "menu_talk_none": ("-隊伍傳話（尚未組隊）", "-Party messages (no party)"),
     "menu_forget": ("喝下忘卻藥水… 🧪(｀・ω・´)", "Drink the potion of forgetting… 🧪(｀・ω・´)"),
+    "menu_reply": ("複製回覆…", "Copy reply…"),
+    "menu_reply_unsupported": ("-複製回覆（{name} 暫不支援）", "-Copy reply ({name} not supported yet)"),
+    "reply_title": ("複製回覆 · {proj} · 第 {i}/{n} 則", "Copy reply · {proj} · {i} of {n}"),
+    "reply_title_plain": ("複製回覆", "Copy reply"),
+    "reply_hint": ("↑↓ 選擇  Enter 複製  ←→ 前一則／後一則回覆  Esc 關閉（也可用滑鼠點）",
+                   "↑↓ select  Enter copy  ←→ previous/next reply  Esc close (mouse works too)"),
+    "reply_whole": ("整則回覆（{n} 行）", "Whole reply ({n} lines)"),
+    "reply_block": ("[{lang}] {first}（{n} 行）", "[{lang}] {first} ({n} lines)"),
+    "reply_code": ("程式碼", "code"),
+    "reply_preview": ("預覽", "Preview"),
+    "reply_lines": ("第 {a}-{b} / {n} 行", "lines {a}-{b} of {n}"),
+    # 以 * 包住的字是操作關鍵字，畫面上以青色粗體顯示（其餘灰色）
+    "reply_range_hint": ("只要其中一段：在預覽中*拖曳*選取，或*點擊*起點、捲動後再*點擊*終點（滾輪捲動預覽）",
+                         "Just part of it: *drag* in the preview, or *click* the first line, scroll, and *click* the last"),
+    "reply_copied_more": ("✅ 已複製 {n} 行到剪貼簿 · 可以繼續複製其他段落，Esc 關閉",
+                          "✅ Copied {n} lines to the clipboard · copy more, or Esc to close"),
+    "reply_dragging": ("已選第 {a}-{b} 行（{n} 行）· *放開*即複製 · 拖到最上／最下一行會自動捲動",
+                       "Lines {a}-{b} ({n}) · *release* to copy · hold at the top/bottom line to scroll"),
+    "reply_range_end": ("已選第 {a}-{b} 行（{n} 行）· *點擊*終點或按 *Enter* 複製 · *↑↓* 調整 · *Esc* 取消",
+                        "Lines {a}-{b} ({n}) · *click* the last line or press *Enter* to copy · *↑↓* adjust · *Esc* cancel"),
+    "reply_no_log_codex": ("還找不到這個 Codex 的對話紀錄。\n\n請讓它再回覆一次後再試；如果還是找不到，"
+                           "可能是這個 Codex 版本改了紀錄格式，暫時不支援。",
+                           "Can't find this Codex conversation yet.\n\nLet it reply once more and try again. If it still "
+                           "can't be found, this Codex version may use a log format that isn't supported yet."),
+    "reply_truncated": ("（紀錄中已截斷，內容不完整）", "(truncated in the log; incomplete)"),
+    "reply_none": ("這個 Agent 還沒有回覆。", "This agent has not replied yet."),
+    "reply_no_log": ("還找不到這個 Agent 的對話紀錄。\n\n請讓它再回覆一次（或送出一則訊息）後再試。",
+                     "Can't find this agent's conversation yet.\n\nLet it reply once more (or send it a message), then try again."),
     "menu_forget_none": ("-喝下忘卻藥水（尚未組隊）", "-Potion of forgetting (no party)"),
     "confirm_forget_prompt": ("要讓 {index} {proj}（{name}）喝下忘卻藥水嗎？過去的對話與隊友會被遺忘，"
                               "之前隊伍的傳話收進封存卷軸 (y/n) ",
@@ -236,7 +266,11 @@ STRINGS = {
     "farewell": ("{proj}（{name}）離隊了…", "{proj} ({name}) has left the party…"),
     "path": ("路徑", "path"),
     "branch": ("分支", "branch"),
-    "select_mode": ("選取模式：放開滑鼠即複製 · q 離開", "Select mode: release to copy · q to exit"),
+    "select_mode": ("選取中：放開即複製 · 拖到最上／最下一行會自動捲動 · q 取消",
+                    "Selecting: release to copy · hold at the top/bottom line to scroll · q cancel"),
+    # 複製完成時畫面中央的提示框
+    "copied_n": ("✅ 已複製 {n} 行到剪貼簿", "✅ Copied {n} lines to the clipboard"),
+    "copied_1": ("✅ 已複製 1 行到剪貼簿", "✅ Copied 1 line to the clipboard"),
     # 往上捲動時的提示（tmux 會代入 #{scroll_position} 等數字）
     "scroll_hint": ("↑ 已往上捲 #{scroll_position} 行（共 #{history_size} 行）· 點一下畫面回到底部",
                     "↑ Scrolled up #{scroll_position} lines (of #{history_size}) · click the screen to return"),
@@ -3171,34 +3205,111 @@ def collab_messages(wid):
     text_viewer(T("collab_msgs_title", g=group), text, start_at_end=True, reopen=["msgs", wid])
 
 
-def wrap_text(text, width):
-    """依顯示寬度（中文算 2 格）換行；換行後的續行保留原本的縮排。"""
+WRAP_NO_LINE_START = "，。、；：！？）」』》〉】,.;:!?)"   # 不放在行首的標點
+WRAP_NO_LINE_END = "（「『《〈【"                         # 不放在行尾的標點
+HELP_COL = "\x1f"     # 手冊兩欄列中「標籤｜說明」的分界（不顯示）：折行時續行對齊說明欄
+
+
+def wrap_text(text, width, columns=False):
+    """依顯示寬度（中文算 2 格）換行；換行後的續行保留原本的縮排。
+    columns=True（手冊）：含 HELP_COL 的兩欄列，續行對齊說明欄（說明欄太靠右時改用一般縮排）。"""
     width = max(width, 4)
     out = []
     for raw_line in str(text).replace("\x00", "").split("\n"):
+        hang = None
+        if columns and HELP_COL in raw_line:
+            label, desc = raw_line.split(HELP_COL, 1)
+            raw_line = label + desc
+            hang = str_w(label.expandtabs(4))
         line = clean_ctrl(raw_line.replace("\r", "").expandtabs(4))
         indent_len = min(len(line) - len(line.lstrip(" ")), max(width // 3, 0))
         indent = " " * indent_len
         prefix = indent + ("  " if indent else "")
+        if hang is not None and hang <= width // 2:
+            prefix = " " * hang
         prefix_w = len(prefix)
         # 逐字累加目前這一行的寬度（不要每個字都重算整行寬度，長訊息會慢到捲動卡頓）
         cur, cur_w = [], 0
+        # 可以在空白處換行的起點（顯示寬度）：第一行不能切在開頭的縮排或手冊的標籤欄內，續行不能切在縮排內
+        min_w = hang if hang is not None else indent_len
+        wrapped = False                        # 這一行原文已經換行過（之後的續行開頭不留空白）
+        n0 = len(out)
         for ch in line:
             cw = char_w(ch)
             if cur_w + cw > width:
-                out.append("".join(cur))
-                if prefix_w + cw > width:
-                    cur, cur_w = [ch], cw
+                wrapped = True
+                now = "".join(cur)
+                # 換行點：英文單字（連續的半形非空白字元）不切成兩半，整個字移到下一行；
+                # 「，。」）」等標點不放在行首，連同前一個字一起移到下一行；其他（中文）在任何字之間換行
+                j = len(now)
+                if ch != " " and cw == 1:
+                    while j > 0 and now[j - 1] != " " and char_w(now[j - 1]) == 1:
+                        j -= 1
+                elif ch in WRAP_NO_LINE_START:
+                    while j > 0 and now[j - 1] in WRAP_NO_LINE_START:      # 連續的標點（例如「」。」）一起移
+                        j -= 1
+                    while j > 0 and now[j - 1] == " ":                      # 不把空白帶到下一行開頭
+                        j -= 1
+                    if j > 0 and char_w(now[j - 1]) == 1:                  # 前面是英文單字：整個字一起移
+                        while j > 0 and now[j - 1] != " " and char_w(now[j - 1]) == 1:
+                            j -= 1
+                    else:                                                  # 前面是中文：帶上前一個字
+                        j = max(j - 1, 0)
+                while j > 0 and now[j - 1] in WRAP_NO_LINE_END:            # 左括號不留在行尾
+                    j -= 1
+                moved = now[j:].lstrip(" ")
+                # 換行點之前要有實際的文字（只有空白時不換行，否則會多出空白行）
+                if j < len(now) and str_w(now[:j].rstrip()) > min_w and prefix_w + str_w(moved) + cw <= width:
+                    out.append(now[:j].rstrip())
+                    cur, cur_w = [prefix, moved], prefix_w + str_w(moved)
                 else:
-                    cur, cur_w = [prefix, ch], prefix_w + cw
-            else:
-                cur.append(ch)
-                cur_w += cw
-        out.append("".join(cur))
+                    if now.strip():                # 只有縮排、沒有文字（寬度極窄時）：不輸出空白行
+                        out.append(now.rstrip() if ch == " " else now)
+                    cur, cur_w = ([prefix], prefix_w) if prefix_w + cw <= width else ([], 0)
+                    min_w = prefix_w
+                    if ch == " ":                  # 續行不以空白開頭
+                        continue
+                min_w = prefix_w
+            if ch == " " and wrapped and cur_w <= prefix_w:     # 續行開頭的空白全部略過（連續空白、tab 展開後）
+                continue
+            cur.append(ch)
+            cur_w += cw
+        last = "".join(cur)
+        if not (wrapped and not last.strip()):    # 換行後只剩結尾的空白：不另外輸出一行空白
+            out.append(last)
+        elif len(out) == n0:                       # 整行只有空白（比寬度還寬）：仍保留一個空行，段落間隔不會消失
+            out.append("")
     return out
 
 
-def text_viewer(title, text, start_at_end=False, extra_keys="", extra_hint="", reopen=None):
+def draw_scrollbar(scr, y0, x, view, top, max_top, total):
+    """在第 x 欄、第 y0 列起的 view 列畫捲軸：軌道 + 代表目前可見範圍的亮色區塊（像網頁的捲軸）。
+    max_top = 0（內容不超過一頁）時不畫。各個可以捲動的視窗共用。
+    以 1/8 格為單位計算，滑塊的上下緣可以停在格子中間，移動起來比較平順。
+    滑塊最短 3 格（像網頁捲軸的最小長度）：內容很多時滑塊若只剩 1 格，會跨在兩格之間變成
+    上下兩小截、沒有實心的部分，移動時長短一直變，看起來像殘影。"""
+    if not max_top or total <= 0:
+        return
+    thumb_len = min(max(24, view * view * 8 // total), view * 8)
+    thumb_pos = round(top / max_top * (view * 8 - thumb_len))
+    for i in range(view):
+        cell_top, cell_bottom = i * 8, i * 8 + 8
+        cover = min(cell_bottom, thumb_pos + thumb_len) - max(cell_top, thumb_pos)
+        # 整格：用「字與底同色」的 █（單用 █ 時 macOS 終端機的行距會在上下格之間留縫；
+        # 也不能用反白的空白，終端機可能把空白當成清除畫面處理，留下殘影）
+        if cover >= 8:
+            scr.addstr(y0 + i, x, "█", curses.color_pair(16))
+        elif cover <= 0:
+            scr.addstr(y0 + i, x, "│", dim_attr())
+        elif thumb_pos > cell_top:
+            # 滑塊從這格中間開始：下方 cover/8 是滑塊（▁▂▃…▇）
+            scr.addstr(y0 + i, x, LOWER_BLOCKS[cover], curses.color_pair(4))
+        else:
+            # 滑塊在這格中間結束：上方 cover/8 是滑塊（青底，下方以底色的方塊蓋掉）
+            scr.addstr(y0 + i, x, LOWER_BLOCKS[8 - cover], curses.color_pair(17))
+
+
+def text_viewer(title, text, start_at_end=False, extra_keys="", extra_hint="", reopen=None, columns=False):
     """唯讀的文字視窗：滑鼠滾輪、↑↓、PgUp/PgDn 捲動；Esc、q、Enter 關閉。
     按下 extra_keys 中的按鍵也會關閉，並回傳該按鍵（例如手冊的 g 切換語言）。
     reopen：重開這個視窗的子指令（例如 ["help"]）。視窗大小改變時 tmux 3.2 會關掉彈出視窗，
@@ -3237,9 +3348,9 @@ def text_viewer(title, text, start_at_end=False, extra_keys="", extra_hint="", r
             bar_x = w - 2                          # 捲軸所在的欄（右邊留 1 格，避免寫到右下角出錯）
             if (w, h) not in wrapped:
                 wrapped.clear()
-                lines = wrap_text(body, max(w - 2, 10))
+                lines = wrap_text(body, max(w - 2, 10), columns)
                 if len(lines) > view:              # 需要捲動：讓出右側的捲軸位置後重新換行
-                    lines = wrap_text(body, max(w - 5, 10))
+                    lines = wrap_text(body, max(w - 5, 10), columns)
                 wrapped[(w, h)] = lines
             lines = wrapped[(w, h)]
             max_top = max(len(lines) - view, 0)
@@ -3250,33 +3361,12 @@ def text_viewer(title, text, start_at_end=False, extra_keys="", extra_hint="", r
             top = min(max(top, 0), max_top)
             target = min(max(target, 0), max_top)
             state["top"] = target
-            # 捲軸：軌道 + 代表目前可見範圍的亮色區塊（像網頁的捲軸）。
-            # 以 1/8 格為單位計算，滑塊的上下緣可以停在格子中間，移動起來比較平順
-            # 滑塊最短 3 格（像網頁捲軸的最小長度）：內容很多時滑塊若只剩 1 格，會跨在兩格之間變成
-            # 上下兩小截、沒有實心的部分，移動時長短一直變，看起來像殘影
-            thumb_len = min(max(24, view * view * 8 // len(lines)), view * 8) if max_top else 0
-            thumb_pos = round(top / max_top * (view * 8 - thumb_len)) if max_top else 0
             stdscr.erase()
             try:
                 title_bar(stdscr, title)
                 for i, line in enumerate(lines[top: top + view]):
                     stdscr.addstr(1 + i, 1, line)
-                if max_top:
-                    for i in range(view):
-                        cell_top, cell_bottom = i * 8, i * 8 + 8
-                        cover = min(cell_bottom, thumb_pos + thumb_len) - max(cell_top, thumb_pos)
-                        # 整格：用「字與底同色」的 █（單用 █ 時 macOS 終端機的行距會在上下格之間留縫；
-                        # 也不能用反白的空白，終端機可能把空白當成清除畫面處理，留下殘影）
-                        if cover >= 8:
-                            stdscr.addstr(1 + i, bar_x, "█", curses.color_pair(16))
-                        elif cover <= 0:
-                            stdscr.addstr(1 + i, bar_x, "│", dim_attr())
-                        elif thumb_pos > cell_top:
-                            # 滑塊從這格中間開始：下方 cover/8 是滑塊（▁▂▃…▇）
-                            stdscr.addstr(1 + i, bar_x, LOWER_BLOCKS[cover], curses.color_pair(4))
-                        else:
-                            # 滑塊在這格中間結束：上方 cover/8 是滑塊（青底，下方以底色的方塊蓋掉）
-                            stdscr.addstr(1 + i, bar_x, LOWER_BLOCKS[8 - cover], curses.color_pair(17))
+                draw_scrollbar(stdscr, 1, bar_x, view, top, max_top, len(lines))
                 # 最後一列：還有多少沒看（黃色）或已到底，接著是操作提示
                 x = 1
                 if max_top:
@@ -3833,7 +3923,7 @@ def right_menu_prepare(pane, mx, my, where="row"):
     # 下方放得下 → 往下展開（上框線在游標那一列）；放不下 → 往上展開（下框線在游標那一列）。
     left, top = (to_int(v) for v in (tmux("display-message", "-p", "-t", pane, "#{pane_left} #{pane_top}").split() + ["0", "0"])[:2])
     client_h = to_int(tmux("display-message", "-p", "-t", pane, "#{client_height}")) or 999
-    height = 7 + 2                               # 6 個選項 + 分隔線 + 上下框線
+    height = 8 + 2                               # 7 個選項 + 分隔線 + 上下框線
     row = top + to_int(my)
     if row + height <= client_h - 1:             # 保留最下面的狀態列
         bottom = row + height                    # tmux 的 -y 是選單的下緣（不含）
@@ -3845,6 +3935,8 @@ def right_menu_prepare(pane, mx, my, where="row"):
          "set-option", "-g", "@menu_y", str(bottom), TMUX_SEP,
          "set-option", "-g", "@menu_title", f" {w['index']} {tmux_safe(proj)} ", TMUX_SEP,
          "set-option", "-g", "@menu_collab", collab, TMUX_SEP,
+         "set-option", "-g", "@menu_reply", T("menu_reply") if w["name"] in REPLY_AGENTS
+         else T("menu_reply_unsupported", name=w["name"]), TMUX_SEP,
          "set-option", "-g", "@menu_msgs", T("menu_talk") if w.get("group") else T("menu_talk_none"), TMUX_SEP,
          "set-option", "-g", "@menu_forget", T("menu_forget") if w.get("group") else T("menu_forget_none"))
 
@@ -3864,6 +3956,10 @@ def menu_action(kind, wid, client):
         popup(f"{shlex.quote(PY_BIN)} -I {shlex.quote(SELF)} topic {shlex.quote(wid)}", 70, 8, client=client)
     elif kind == "collab":
         popup(f"{shlex.quote(PY_BIN)} -I {shlex.quote(SELF)} collab {shlex.quote(wid)}", 80, 18, client=client)
+    elif kind == "reply":
+        if w["name"] in REPLY_AGENTS:
+            popup(f"{shlex.quote(PY_BIN)} -I {shlex.quote(SELF)} reply {shlex.quote(wid)} {shlex.quote(client)}",
+                  110, 32, cover=True, client=client)
     elif kind == "msgs":
         popup(f"{shlex.quote(PY_BIN)} -I {shlex.quote(SELF)} msgs {shlex.quote(wid)}", 110, 32, cover=True, client=client)
 
@@ -4534,102 +4630,134 @@ def new_agent_ui():
 
 
 # ---------------------------------------------------------------- 文字畫面
+def help_layout(sections):
+    """手冊排版：sections = [(標題, [列…])]；列是 (標籤, 說明) 的兩欄列，或單一字串（一般說明）。
+    兩欄列的說明一律對齊同一欄（依實際顯示寬度計算：中文、表情符號算 2 格），折行時續行也對齊說明欄。"""
+    labels = [r[0] for _, rows in sections for r in rows if isinstance(r, tuple)]
+    col = max((str_w(x) for x in labels), default=0) + 3
+    out = []
+    for title, rows in sections:
+        out.append(" " + title)
+        for r in rows:
+            if isinstance(r, tuple):
+                out.append("   " + r[0] + " " * (col - str_w(r[0])) + HELP_COL + r[1])
+            else:
+                out.append("   " + r)
+        out.append("")
+    return "\n".join(out[:-1]) + "\n"
+
+
 def help_text():
     """冒險手冊內容（依介面語言）。"""
     if is_en():
-        native = ("Option + drag (iTerm2): use the terminal's own selection" if IS_MAC
-                  else "Shift + drag: use Windows Terminal's own selection")
         paste = "Cmd+V" if IS_MAC else "Shift + right-click or Ctrl+V (a plain right-click does not paste)"
         term = "the terminal" if IS_MAC else "Windows Terminal"
-        return f"""\
- Sidebar (the letter in each button is its key)
-   Click an agent       Switch to it (or ↑↓ + Enter, or press its number)
-   [+ New]   n          Choose an agent and a project folder, open a new window
-   [t Label] t          Set a label by hand (replaces the automatic topic; not sent to the agent)
-   [x Leave] x          End the agent under the cursor (asks to confirm)
-   [l Party] l          Pair two Claude agents into a party (Claude only), or disband (restarts both)
-   [m Talk]  m          Read the party's messages
-   [q Rest]  q          Top right; leave the screen, agents keep running in the background
-   Right-click agent    Its command menu (go to, label, party, messages, potion of forgetting, remove) without switching to it
-   Click ⋮ on its row   Same menu, for terminals that keep right-click to themselves
-
- Status
-   {T("st_wait")}   Finished; the time it took is in brackets
-   {T("st_approve")}         Needs your approval, or is asking you a question
-   {T("st_work")}               Still working; time so far in brackets
-   {T("st_ready")}          Started, waiting for your input
-   ⏳ Waiting for app      In a party: waiting for the partner (not for you)
-   🏹 Squads out ×2        Waiting for its background subtasks (not for you); notified as each squad returns
-   Claude / Codex / Antigravity / Grok / Gemini report through official hooks; if Gemini is too old to send reports, it is guessed from "no screen change for {IDLE_SECS}s"
-   When an agent exits (even by an accidental Ctrl+C) its window stays: press y to remove it, or r to restart it (Claude resumes the conversation)
-   ✅ / ✋ also pop up a system notification (not for the agent you are looking at); turn off: export AGENTS_NOTIFY=0
-
- Party (collaboration group)
-   Claude only: both members must be Claude; Codex / Gemini / Antigravity / Grok cannot join yet.
-   Each can change only its own project, cannot see the partner's folder, and talks by message only.
-   Whoever you give a request to leads it and reports back. While it is in progress the list shows "🔗A ↔ 4 app · leader"; the label goes away when it is done.
-   Forming or disbanding resumes the conversation; to make a member forget earlier chats and partners, right-click it and choose "potion of forgetting".
-
- Other
-   Wheel: scroll the list (or click ▲/▼); scroll up in an agent to see earlier output
-   Drag to select: copies to the clipboard on release; {native}
-   Paste: {paste}
-   Close {term} or click [q Rest] and agents keep running; type nirenne to come back; stop all: nirenne stop
-   Shutting down or restarting the computer ends the manager and every agent; nothing is kept
-
- Language
-   g                    Switch to Traditional Chinese (press g in this window)
-"""
-    native = ("Option + 拖曳（iTerm2）：使用終端機原本的選取" if IS_MAC
-              else "Shift + 拖曳：使用 Windows Terminal 原本的選取")
+        native = (("Option + drag", "Use the terminal's own selection (iTerm2)") if IS_MAC
+                  else ("Shift + drag", "Use Windows Terminal's own selection"))
+        other = [
+            ("Wheel", "Scroll the list (or click ▲/▼); scroll up in an agent to see earlier output"),
+            ("Drag", "Select text; copied to the clipboard on release. Hold at the top/bottom line to scroll"),
+            native,
+            ("Copy reply", "Right-click a Claude, Codex, Grok or Antigravity agent → Copy reply: copy a reply or one of its code blocks as is. "
+                           "In the preview, drag, or click the first line and then the last, to copy just that "
+                           "part. The window stays open so you can copy more; Esc closes it"),
+            ("Paste", paste),
+            ("Rest", f"Close {term} or click [q Rest] and agents keep running; type nirenne to come back; "
+                     "stop all: nirenne stop"),
+            ("Shut down", "Shutting down or restarting the computer ends the manager and every agent; nothing is kept"),
+        ]
+        return help_layout([
+            ("Sidebar (the letter in each button is its key)", [
+                ("Click an agent", "Switch to it (or ↑↓ + Enter, or press its number)"),
+                ("[+ New]   n", "Choose an agent and a project folder, open a new window"),
+                ("[t Label] t", "Set a label by hand (replaces the automatic topic; not sent to the agent)"),
+                ("[x Leave] x", "End the agent under the cursor (asks to confirm)"),
+                ("[l Party] l", "Pair two Claude agents into a party (Claude only), or disband (restarts both)"),
+                ("[m Talk]  m", "Read the party's messages"),
+                ("[q Rest]  q", "Top right; leave the screen, agents keep running in the background"),
+                ("Right-click agent", "Its command menu (go to, label, copy reply, party, messages, "
+                                      "potion of forgetting, remove) without switching to it"),
+                ("Click ⋮ on its row", "Same menu, for terminals that keep right-click to themselves"),
+            ]),
+            ("Status", [
+                (T("st_wait"), "Finished; the time it took is in brackets"),
+                (T("st_approve"), "Needs your approval, or is asking you a question"),
+                (T("st_work"), "Still working; time so far in brackets"),
+                (T("st_ready"), "Started, waiting for your input"),
+                ("⏳ Waiting for app", "In a party: waiting for the partner (not for you)"),
+                ("🏹 Squads out ×2", "Waiting for its background subtasks (not for you); notified as each squad returns"),
+                "Claude / Codex / Antigravity / Grok / Gemini report through official hooks; if Gemini is too old to "
+                f'send reports, it is guessed from "no screen change for {IDLE_SECS}s"',
+                "When an agent exits (even by an accidental Ctrl+C) its window stays: press y to remove it, "
+                "or r to restart it (Claude resumes the conversation)",
+                "✅ / ✋ also pop up a system notification (not for the agent you are looking at); "
+                "turn off: export AGENTS_NOTIFY=0",
+            ]),
+            ("Party (collaboration group)", [
+                "Claude only: both members must be Claude; Codex / Gemini / Antigravity / Grok cannot join yet.",
+                "Each can change only its own project, cannot see the partner's folder, and talks by message only.",
+                'Whoever you give a request to leads it and reports back. While it is in progress the list shows '
+                '"🔗A ↔ 4 app · leader"; the label goes away when it is done.',
+                "Forming or disbanding resumes the conversation; to make a member forget earlier chats and partners, "
+                'right-click it and choose "potion of forgetting".',
+            ]),
+            ("Other", other),
+            ("Language", [("g", "Switch to Traditional Chinese (press g in this window)")]),
+        ])
     paste = "Cmd+V" if IS_MAC else "Shift + 右鍵 或 Ctrl+V（單按右鍵不會貼上）"
     term = "終端機" if IS_MAC else "Windows Terminal"
-    return f"""\
- 左側清單（按鈕旁的字母是對應的按鍵）
-   點一下隊員           切換到該 Agent（也可用 ↑↓ + Enter，或數字鍵直接跳）
-   [+ 召喚]  n          選擇 Agent 類型與專案資料夾，開新視窗
-   [t 標籤]  t          手動設定標籤（會取代自動抓的主題；不會傳給 Agent）
-   [x 離隊]  x          結束游標所在的 Agent（會再確認一次）
-   [l 組隊]  l          把兩個 Claude 組成隊伍（協作組，目前只支援 Claude），或解散（會重新啟動兩者）
-   [m 傳話]  m          查看隊伍的往來訊息
-   [q 休息]  q          右上角；離開畫面，Agent 繼續在背景執行
-   右鍵點隊員           跳出該隊員的指令選單（前往、標籤、組隊、傳話、喝下忘卻藥水、離隊），不必先切換過去
-   點隊員右邊的 ⋮       開同一份選單（終端機的右鍵被攔下來時使用）
-
- 狀態
-   {T("st_wait")}   這次任務完成，括號內是花費時間
-   {T("st_approve")}       Agent 要你核准操作，或在問你問題
-   {T("st_work")}              還在處理，括號內是目前已花的時間
-   {T("st_ready")}              Agent 已啟動，等你輸入
-   ⏳ 等 app 回報         組隊中：在等隊友回報（不是在等你）
-   🏹 分隊出征中 ×2       主任務派出背景子任務，正在等它們回來（不是在等你）；每支分隊回來會通知
-   Claude / Codex / Antigravity / Grok / Gemini 由官方 hooks 回報；Gemini 版本太舊收不到回報時，改以「畫面 {IDLE_SECS} 秒沒變化」推測，偶爾不準
-   Agent 結束時（含不小心按到 Ctrl+C）不會直接關閉：按 y 離隊，或按 r 重新啟動（Claude 會接回剛才的對話）
-   ✅ 完成或 ✋ 需要核准時會跳出系統通知（正在看的 Agent 除外）；關閉：export AGENTS_NOTIFY=0
-
- 組隊（協作組）
-   目前只支援 Claude：兩位隊員都必須是 Claude；Codex / Gemini / Antigravity / Grok 暫時無法組隊。
-   兩個 Claude 組成一隊：各自只能改自己的專案、看不到對方的專案資料夾，只能透過訊息溝通。
-   你找誰下需求，誰就是隊長，完成後由它向你回報。進行中清單顯示「🔗A ↔ 4 app · 隊長」，做完就拿掉；同隊同色。
-   組隊與解散會接回原本的對話；不想讓隊員記得之前的對話與舊隊友，右鍵選「喝下忘卻藥水」。
-
- 其他
-   滾輪：清單太長時捲動清單（或點 ▲/▼）；在 Agent 畫面往上捲可看之前的輸出
-   滑鼠拖曳選取：放開即複製到剪貼簿；{native}
-   貼上：{paste}
-   關掉 {term} 或點 [q 休息]，Agent 繼續在背景跑，輸入 nirenne 接回；全部結束：nirenne stop
-   電腦關機或重新開機後，管理畫面與所有 Agent 都會結束，不會保留，需要重新開啟
-
- 語言
-   g                    切換為英文（在這個手冊視窗按 g）
-"""
+    native = (("Option + 拖曳", "使用終端機原本的選取（iTerm2）") if IS_MAC
+              else ("Shift + 拖曳", "使用 Windows Terminal 原本的選取"))
+    other = [
+        ("滾輪", "清單太長時捲動清單（或點 ▲/▼）；在 Agent 畫面往上捲可看之前的輸出"),
+        ("滑鼠拖曳", "選取文字，放開即複製到剪貼簿；拖到最上／最下一行會自動捲動"),
+        native,
+        ("複製回覆", "右鍵點 Claude、Codex、Grok 或 Antigravity 隊員 →「複製回覆」：複製回覆原文或其中的程式碼；在預覽中拖曳，或點擊起點、"
+                     "再點擊終點，可以只複製其中一段；複製後視窗不關閉，可以繼續複製，Esc 關閉"),
+        ("貼上", paste),
+        ("休息", f"關掉{term}或點 [q 休息]，Agent 繼續在背景跑，輸入 nirenne 接回；全部結束：nirenne stop"),
+        ("關機", "電腦關機或重新開機後，管理畫面與所有 Agent 都會結束，不會保留，需要重新開啟"),
+    ]
+    return help_layout([
+        ("左側清單（按鈕旁的字母是對應的按鍵）", [
+            ("點一下隊員", "切換到該 Agent（也可用 ↑↓ + Enter，或數字鍵直接跳）"),
+            ("[+ 召喚]  n", "選擇 Agent 類型與專案資料夾，開新視窗"),
+            ("[t 標籤]  t", "手動設定標籤（會取代自動抓的主題；不會傳給 Agent）"),
+            ("[x 離隊]  x", "結束游標所在的 Agent（會再確認一次）"),
+            ("[l 組隊]  l", "把兩個 Claude 組成隊伍（協作組，目前只支援 Claude），或解散（會重新啟動兩者）"),
+            ("[m 傳話]  m", "查看隊伍的往來訊息"),
+            ("[q 休息]  q", "右上角；離開畫面，Agent 繼續在背景執行"),
+            ("右鍵點隊員", "跳出該隊員的指令選單（前往、標籤、複製回覆、組隊、傳話、喝下忘卻藥水、離隊），不必先切換過去"),
+            ("點隊員右邊的 ⋮", "開同一份選單（終端機的右鍵被攔下來時使用）"),
+        ]),
+        ("狀態", [
+            (T("st_wait"), "這次任務完成，括號內是花費時間"),
+            (T("st_approve"), "Agent 要你核准操作，或在問你問題"),
+            (T("st_work"), "還在處理，括號內是目前已花的時間"),
+            (T("st_ready"), "Agent 已啟動，等你輸入"),
+            ("⏳ 等 app 回報", "組隊中：在等隊友回報（不是在等你）"),
+            ("🏹 分隊出征中 ×2", "主任務派出背景子任務，正在等它們回來（不是在等你）；每支分隊回來會通知"),
+            f"Claude / Codex / Antigravity / Grok / Gemini 由官方 hooks 回報；Gemini 版本太舊收不到回報時，"
+            f"改以「畫面 {IDLE_SECS} 秒沒變化」推測，偶爾不準",
+            "Agent 結束時（含不小心按到 Ctrl+C）不會直接關閉：按 y 離隊，或按 r 重新啟動（Claude 會接回剛才的對話）",
+            "✅ 完成或 ✋ 需要核准時會跳出系統通知（正在看的 Agent 除外）；關閉：export AGENTS_NOTIFY=0",
+        ]),
+        ("組隊（協作組）", [
+            "目前只支援 Claude：兩位隊員都必須是 Claude；Codex / Gemini / Antigravity / Grok 暫時無法組隊。",
+            "兩個 Claude 組成一隊：各自只能改自己的專案、看不到對方的專案資料夾，只能透過訊息溝通。",
+            "你找誰下需求，誰就是隊長，完成後由它向你回報。進行中清單顯示「🔗A ↔ 4 app · 隊長」，做完就拿掉；同隊同色。",
+            "組隊與解散會接回原本的對話；不想讓隊員記得之前的對話與舊隊友，右鍵選「喝下忘卻藥水」。",
+        ]),
+        ("其他", other),
+        ("語言", [("g", "切換為英文（在這個手冊視窗按 g）")]),
+    ])
 
 
 def help_screen():
     """冒險手冊；按 g 切換介面語言，所有畫面立即更新，手冊以新語言重新開啟。"""
     while True:
         key = text_viewer(T("help_title"), help_text(), extra_keys="g", extra_hint=T("help_lang_hint"),
-                          reopen=["help"])
+                          reopen=["help"], columns=True)
         if key != "g":
             return
         set_lang("zh-TW" if is_en() else "en")
@@ -4654,6 +4782,17 @@ def apply_ui_lang():
     tmux("set-option", "-g", "@agents_waiting", "")
     poke_active_sidebar()
     refresh_welcome()
+
+def reload_conf():
+    """重新安裝後讓執行中的管理畫面立即套用新的 tmux 設定（右鍵選單、快速鍵、狀態列），不必重開、Agent 不中斷。
+    由 install.sh 呼叫；管理畫面沒開著時不做事（下次開啟時本來就會讀新設定）。
+    tmux.conf 裡的介面文字是中文預設值，重新載入後要再套用一次目前的介面語言。
+    重新載入不會刪掉設定檔裡已經拿掉的綁定與 hook：版本之間拿掉的東西要在 tmux.conf 裡明確 unbind／設回預設。"""
+    if not has_session():
+        return
+    tmux("source-file", TMUX_CONF)
+    apply_ui_lang()
+
 
 # 標題字型（像素風，5 列高）；字母之間空 2 格，比較不擠
 LOGO_GLYPHS = {
@@ -4874,11 +5013,12 @@ def has_children(pid):
         return True
 
 
-def copy_to_clipboard():
-    """tmux 選取後的複製動作：把文字送到系統剪貼簿。
+def copy_to_clipboard(data=None):
+    """tmux 選取後的複製動作：把文字送到系統剪貼簿（data 省略時從標準輸入讀）。
     Windows Terminal → 交給 OSC 52（tmux 自動送出）；其他 WSL 終端機 → PowerShell Set-Clipboard；
     macOS → pbcopy；Linux → wl-copy / xclip / xsel。"""
-    data = sys.stdin.buffer.read()
+    if data is None:
+        data = sys.stdin.buffer.read()
     text = data.decode("utf-8", "replace")
     if os.environ.get("WT_SESSION"):
         # Windows Terminal 原生支援 OSC 52（tmux set-clipboard on 會送出），快速且不會亂碼；
@@ -4923,6 +5063,620 @@ def copy_to_clipboard():
                     return
             except (OSError, subprocess.TimeoutExpired):
                 continue
+
+
+COPIED_SHOW_SECS = 2.0
+
+
+def copied_notice(client, delay="0"):
+    """複製完成後在右下角顯示綠色「✅ 已複製 N 行到剪貼簿」約 2 秒（N = 實際複製到的行數）。
+    不用彈出視窗：彈出視窗開著時會攔下所有按鍵，複製後馬上貼上或打字會整段遺失。
+    只在剛產生新的複製內容時顯示（沒選到東西時 tmux 不會產生新內容，不能拿上一次的來算）。"""
+    try:
+        time.sleep(min(max(float(delay), 0.0), 2.0))
+    except ValueError:
+        pass
+    info = tmux("list-buffers", "-F", "#{buffer_created} #{buffer_name}").split("\n")[0].split(" ", 1)
+    if len(info) != 2 or not re.fullmatch(r"[0-9]{1,12}", info[0]) or time.time() - int(info[0]) > 3:
+        return
+    try:
+        data = subprocess.run([TMUX_BIN, "-L", SOCKET, "show-buffer", "-b", info[1]],
+                              capture_output=True, timeout=5).stdout.decode("utf-8", "replace")
+    except (OSError, subprocess.TimeoutExpired):
+        return
+    n = data.count("\n") + (0 if data.endswith("\n") else 1) if data else 0
+    if not n:
+        return
+    msg = T("copied_1") if n == 1 else T("copied_n", n=n)
+    token = f"{os.getpid()}-{time.time()}"
+    tmux("set-option", "-g", "@copied_msg", msg, TMUX_SEP, "set-option", "-g", "@copied_id", token,
+         TMUX_SEP, "refresh-client", "-t", client, "-S")
+    if os.fork() != 0:           # 背景等待後清掉，不卡住呼叫的 tmux 指令
+        return
+    try:
+        os.setsid()
+        # 關掉繼承來的輸出：tmux 的 run-shell 會等到輸出關閉才繼續
+        null = os.open(os.devnull, os.O_RDWR)
+        for fd in (0, 1, 2):
+            os.dup2(null, fd)
+        time.sleep(COPIED_SHOW_SECS)
+        if tmux("show-option", "-gqv", "@copied_id") == token:      # 這段時間又複製了：留給新的提示
+            tmux("set-option", "-gu", "@copied_msg", TMUX_SEP, "set-option", "-gu", "@copied_id",
+                 TMUX_SEP, "refresh-client", "-t", client, "-S")
+    finally:
+        os._exit(0)
+
+
+# ---------------------------------------------------------------- 複製回覆（右鍵選單）
+# Claude Code 的全螢幕模式自己處理捲動，tmux 看不到捲上去的內容；改從對話紀錄取出回覆的原文
+# （完整、不會多出換行與縮排），可以選整則回覆或其中的程式碼區塊。
+CLAUDE_SID_RE = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
+REPLY_FENCE_RE = re.compile(r"^([ \t]*)(`{3,}|~{3,})[ \t]*([^\s`]*)[^\n]*$")
+
+
+REPLY_TAIL_BYTES = 16 * 1024 * 1024        # 對話紀錄很大時只讀結尾（最近的回覆都在後面）
+# 不能出現在複製內容裡的字元：控制字元（保留換行與 tab）、雙向文字覆寫、零寬字元、tag 字元。
+# 回覆可能受到提示注入影響：例如夾帶 ESC[201~ 結束「括號貼上」，貼到終端機時後面的文字會被當成直接輸入執行；
+# 看不見的字元則會讓預覽和實際複製出去的內容不一樣。
+REPLY_UNSAFE_RE = re.compile("[\\x00-\\x08\\x0b-\\x1f\\x7f-\\x9f\\u061c\\u115f\\u1160\\u200b-\\u200f\\u202a-\\u202e"
+                             "\\u2060-\\u2064\\u2066-\\u2069\\u3164\\ufeff\\U000e0000-\\U000e007f]")
+
+
+def reply_safe(text):
+    """複製與預覽共用的清理：去掉 REPLY_UNSAFE_RE 的字元（\r\n 與 Unicode 的行／段落分隔先換成 \n）。"""
+    text = str(text).replace("\r\n", "\n").replace("\u2028", "\n").replace("\u2029", "\n")
+    return REPLY_UNSAFE_RE.sub("", text)
+
+
+REPLY_AGENTS = ("Claude", "Codex", "Grok", "Antigravity")     # 支援「複製回覆」的 Agent
+_READ_MISSING = object()
+
+
+def _read_tail(path):
+    """安全地讀對話紀錄的結尾（最多 REPLY_TAIL_BYTES）：只開檔一次（不跟隨符號連結、只接受自己擁有、
+    沒有其他硬連結的一般檔案），直接從這個檔案讀，不再用路徑重新開檔。
+    檔案不存在回傳 _READ_MISSING（可以再試別的位置）；不符合條件回傳 None。"""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    except FileNotFoundError:
+        return _READ_MISSING
+    except OSError:
+        return None
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid() or st.st_nlink != 1:
+            return None
+        start = max(st.st_size - REPLY_TAIL_BYTES, 0)
+        os.lseek(fd, start, os.SEEK_SET)
+        chunks, left = [], REPLY_TAIL_BYTES
+        while left > 0:
+            chunk = os.read(fd, min(left, 1 << 20))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            left -= len(chunk)
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+    data = b"".join(chunks)
+    if start:                                       # 從中間開始讀：丟掉不完整的第一行
+        data = data[data.find(b"\n") + 1:]
+    return data.decode("utf-8", "replace")
+
+
+def _session_value(w, key):
+    path = valid_session_file(session_path(w.get("session", ""))) if w.get("session") else ""
+    v = read_kv(path).get(key, "") if path else ""
+    return v if CLAUDE_SID_RE.fullmatch(v) else ""
+
+
+def reply_kind(w):
+    """這個視窗的對話紀錄要用哪一種格式讀。組隊中（或解散後仍在沙箱裡執行）的視窗一律當成 Claude：
+    沙箱內的 Agent 可以改自己視窗的 @agent_name（例如改成 "Grok"），不能讓它藉此改讀其他 Agent 的紀錄資料夾。"""
+    name = w.get("name", "")
+    if name != "Claude" and (w.get("group") or collab_proxy_alive(w.get("pane", ""))):
+        return "Claude"
+    return name
+
+
+def claude_transcript(w):
+    """這個 Agent 目前的對話紀錄內容（文字）；找不到回傳 None。依 Agent 種類：
+    - Claude：hook 記下的對話編號（CLAUDE_SID），只在「這個 Agent 自己專案」的紀錄資料夾裡找
+      （與 own_transcript 相同的限制）：組隊沙箱可以決定回報的對話編號，不能讓它指向夥伴或其他專案的紀錄；
+    - Grok（透過 Claude 的 hooks 回報，編號同樣記在 CLAUDE_SID）：~/.grok/sessions/<專案路徑>/<編號>/chat_history.jsonl；
+    - Codex（編號記在 CODEX_THREAD）：$CODEX_HOME（預設 ~/.codex）/sessions/年/月/日/rollout-*-<編號>.jsonl；
+    - Antigravity（編號記在 AGY_CONV，來自 hook 的 conversationId）：
+      ~/.gemini/antigravity-cli/brain/<編號>/.system_generated/logs/transcript_full.jsonl（沒有時用 transcript.jsonl）。"""
+    name = reply_kind(w)
+    dirs = list(dict.fromkeys((os.path.realpath(w["dir"]), os.path.abspath(w["dir"]))))
+    if name == "Codex":
+        tid = _session_value(w, "CODEX_THREAD")
+        base = os.path.realpath(os.path.join(os.environ.get("CODEX_HOME") or os.path.join(HOME, ".codex"), "sessions"))
+        if not tid:
+            return None
+        # 同一個編號有多個檔案（接續、分支留下的）時取最新的（檔名以日期時間開頭）
+        for f in sorted(glob.glob(os.path.join(glob.escape(base), "*", "*", "*", f"rollout-*-{tid}.jsonl")),
+                        reverse=True):
+            if os.path.realpath(os.path.dirname(f)).startswith(base + os.sep):
+                got = _read_tail(f)
+                if got is not _READ_MISSING:
+                    return got
+        return None
+    if name == "Antigravity":
+        conv = _session_value(w, "AGY_CONV")
+        logs = os.path.join(HOME, ".gemini", "antigravity-cli", "brain", conv, ".system_generated", "logs")
+        for f in ("transcript_full.jsonl", "transcript.jsonl") if conv else ():
+            got = _read_tail(os.path.join(logs, f))
+            if got is not _READ_MISSING:
+                return got
+        return None
+    sid = _session_value(w, "CLAUDE_SID")
+    if not sid:
+        return None
+    if name == "Grok":
+        paths = [os.path.join(HOME, ".grok", "sessions", urllib.parse.quote(d, safe=""), sid, "chat_history.jsonl")
+                 for d in dirs]
+    else:
+        bases = [os.path.join(HOME, ".claude")]
+        if not w.get("group") and os.environ.get("CLAUDE_CONFIG_DIR"):   # 組隊中一律用真正的 ~/.claude
+            bases.insert(0, os.environ["CLAUDE_CONFIG_DIR"])          # 解散後仍在沙箱裡執行時，紀錄在 ~/.claude
+        paths = [os.path.join(b, "projects", re.sub(r"[^A-Za-z0-9]", "-", d), sid + ".jsonl") for b in bases for d in dirs]
+    for path in paths:
+        got = _read_tail(path)
+        if got is not _READ_MISSING:
+            return got
+    return None
+
+
+# 這些「使用者訊息」是系統產生的，不是你打的：不算新的一輪（否則同一則回覆會被切成兩則）
+REPLY_NOT_PROMPT = ("[Request interrupted", "<command-", "<local-command-", "<task-notification")
+
+
+def _json_lines(text):
+    for line in (text or "").split("\n"):
+        try:
+            d = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(d, dict):
+            yield d
+
+
+def _codex_replies(text):
+    """Codex（rollout-*.jsonl）：每次你送出訊息會開始一個任務（event_msg 的 task_started），以此分輪；
+    回覆是 response_item 中 role=assistant 的 output_text（工作中的說明 commentary 與最後答覆都算）。"""
+    replies, cur = [], None
+    for d in _json_lines(text):
+        p = d.get("payload") if isinstance(d.get("payload"), dict) else {}
+        if d.get("type") == "event_msg" and p.get("type") == "task_started":
+            if cur:
+                replies.append(cur)
+            cur = []
+        elif d.get("type") == "response_item" and p.get("type") == "message" and p.get("role") == "assistant":
+            for c in p.get("content") if isinstance(p.get("content"), list) else []:
+                if isinstance(c, dict) and c.get("type") == "output_text" and str(c.get("text", "")).strip():
+                    cur = [] if cur is None else cur
+                    cur.append(str(c["text"]).strip("\n"))
+    if cur:
+        replies.append(cur)
+    return ["\n\n".join(r) for r in replies]
+
+
+def _agy_replies(text):
+    """Antigravity（transcript_full.jsonl，每一行是一個步驟）：你打的訊息是 USER_INPUT（包在 <USER_REQUEST> 裡），以此分輪；
+    回覆是帶有 content 的 PLANNER_RESPONSE（其他 PLANNER_RESPONSE 只有思考與工具呼叫）。"""
+    replies, cur = [], None
+    for d in _json_lines(text):
+        content = d.get("content")
+        if d.get("type") == "USER_INPUT" and isinstance(content, str) and "<USER_REQUEST>" in content:
+            if cur:
+                replies.append(cur)
+            cur = []
+        elif d.get("type") == "PLANNER_RESPONSE" and isinstance(content, str) and content.strip():
+            cur = [] if cur is None else cur
+            # 精簡版紀錄（transcript.jsonl）會截斷很長的內容並標在 truncated_fields：註明，免得以為複製到的是完整內容
+            cut = isinstance(d.get("truncated_fields"), list) and "content" in d["truncated_fields"]
+            cur.append(content.strip("\n") + ("\n" + T("reply_truncated") if cut else ""))
+    if cur:
+        replies.append(cur)
+    return ["\n\n".join(r) for r in replies]
+
+
+def _grok_replies(text):
+    """Grok（chat_history.jsonl）：你打的訊息包在 <user_query> 裡（其他 user 訊息是系統自動加的），以此分輪；
+    回覆是 type=assistant 的 content 文字。"""
+    replies, cur = [], None
+    for d in _json_lines(text):
+        content = d.get("content")
+        if d.get("type") == "user":
+            texts = [str(c.get("text", "")) for c in content if isinstance(c, dict)] if isinstance(content, list) \
+                else [str(content or "")]
+            if any("<user_query>" in t for t in texts):
+                if cur:
+                    replies.append(cur)
+                cur = []
+        elif d.get("type") == "assistant":
+            if isinstance(content, list):          # 以後的版本如果改成 [{type: text, text: …}] 也能讀
+                content = "\n\n".join(str(c.get("text", "")) for c in content
+                                       if isinstance(c, dict) and c.get("type") == "text")
+            if isinstance(content, str) and content.strip():
+                cur = [] if cur is None else cur
+                cur.append(content.strip("\n"))
+    if cur:
+        replies.append(cur)
+    return ["\n\n".join(r) for r in replies]
+
+
+def load_replies(text, kind="Claude"):
+    """對話紀錄（JSON Lines 文字）中每一輪（你送出一則訊息之後）Agent 回覆的文字，舊到新。"""
+    if kind == "Codex":
+        return _codex_replies(text)
+    if kind == "Grok":
+        return _grok_replies(text)
+    if kind == "Antigravity":
+        return _agy_replies(text)
+    replies, cur = [], None
+    for line in (text or "").split("\n"):
+        try:
+            d = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(d, dict) or d.get("isSidechain") or d.get("isMeta") or d.get("isCompactSummary"):
+            continue
+        msg = d.get("message") if isinstance(d.get("message"), dict) else {}
+        content = msg.get("content")
+        if d.get("type") == "user":
+            if isinstance(content, str):
+                texts = [content]
+            elif isinstance(content, list):
+                texts = [str(x.get("text", "")) for x in content if isinstance(x, dict) and x.get("type") == "text"]
+            else:
+                texts = []
+            # 你自己打的訊息才算新的一輪（工具結果、中斷、斜線指令的輸出等不算）
+            if any(t.strip() and not t.lstrip().startswith(REPLY_NOT_PROMPT) for t in texts):
+                if cur:
+                    replies.append(cur)
+                cur = []
+        elif d.get("type") == "assistant" and isinstance(content, list):
+            for x in content:
+                if isinstance(x, dict) and x.get("type") == "text" and str(x.get("text", "")).strip():
+                    cur = [] if cur is None else cur
+                    cur.append(str(x["text"]).strip("\n"))
+    if cur:
+        replies.append(cur)
+    return ["\n\n".join(r) for r in replies]
+
+
+def code_blocks(text):
+    """回覆中以 ``` 或 ~~~ 包住的程式碼區塊：[(語言, 內容)]；內容去掉與開頭標記相同的縮排。
+    依 Markdown 的規則：``` 開頭那一行的其餘部分不能再有反引號；結尾標記最多比開頭多縮排 3 格；空的區塊略過。"""
+    blocks, lines, i = [], text.split("\n"), 0
+    while i < len(lines):
+        m = REPLY_FENCE_RE.match(lines[i])
+        if not m or (m.group(2)[0] == "`" and "`" in lines[i][m.end(2):]):
+            i += 1
+            continue
+        indent, fence, lang = m.group(1), m.group(2), m.group(3)
+        close = re.compile(r"^[ \t]{0,%d}" % (len(indent) + 3) + re.escape(fence[0]) + "{%d,}[ \t]*$" % len(fence))
+        body, i = [], i + 1
+        while i < len(lines) and not close.match(lines[i]):
+            ln = lines[i]
+            body.append(ln[len(indent):] if ln.startswith(indent) else ln.lstrip())
+            i += 1
+        i += 1
+        if "".join(body).strip():
+            blocks.append((lang, "\n".join(body)))
+    return blocks
+
+
+def reply_items(text):
+    """選單項目：[(標籤, 要複製的內容)]，第一項是整則回覆，接著是各個程式碼區塊。"""
+    def lines(t):
+        return t.count("\n") + 1
+
+    items = [(T("reply_whole", n=lines(text)), text)]
+    for lang, body in code_blocks(text):
+        first = next((ln.strip() for ln in body.split("\n") if ln.strip()), "")
+        items.append((T("reply_block", lang=lang or T("reply_code"), first=first, n=lines(body)), body))
+    return items
+
+
+def reply_ui(wid, client=""):
+    """右鍵選單「複製回覆」：列出這個 Agent 最近的回覆與其中的程式碼區塊，選一個複製到剪貼簿。"""
+    w = next((x for x in list_windows() if x["id"] == wid), None)
+    if not w:
+        return
+    kind = reply_kind(w)
+    log = claude_transcript(w) if kind in REPLY_AGENTS else None
+    replies = [reply_safe(r) for r in load_replies(log, kind)] if log else []
+    if not replies:
+        missing = T("reply_no_log_codex") if kind == "Codex" else T("reply_no_log")
+        text_viewer(T("reply_title_plain"), T("reply_none") if log is not None else missing)
+        return
+    def do_copy(text):
+        data = reply_safe(text).encode("utf-8")
+        # 先放進 tmux（-w：Windows Terminal 等支援 OSC 52 的終端機也會一起更新剪貼簿），再寫入系統剪貼簿
+        try:
+            subprocess.run([TMUX_BIN, "-L", SOCKET, "load-buffer", "-w", *(["-t", client] if client else []), "-"],
+                           input=data, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+        copy_to_clipboard(data)
+
+    # 複製後視窗不關閉，在視窗內確認（不另外在右下角提示）
+    run_curses(lambda scr: _reply_pick(scr, replies, proj_name(w["dir"]), do_copy))
+
+
+def add_marked(scr, y, x, text, width):
+    """畫一行提示：以 * 包住的字（操作關鍵字）用青色粗體，其餘用灰色；超過 width 時截斷。"""
+    x0 = x
+    for k, part in enumerate(text.split("*")):
+        room = width - (x - x0)
+        if room <= 0 or not part:
+            continue
+        part = part if str_w(part) <= room else fit(part, room)
+        scr.addstr(y, x, part, curses.color_pair(4) | curses.A_BOLD if k % 2 else dim_attr())
+        x += str_w(part)
+
+
+def _show_copied(scr, text):
+    """複製後在畫面中央顯示綠框「✅ 已複製 N 行到剪貼簿」約 1.2 秒再關閉（按任意鍵立刻關閉），
+    讓人知道已經複製成功，不會以為視窗當掉。"""
+    n = text.count("\n") + 1
+    msg = T("copied_1") if n == 1 else T("copied_n", n=n)
+    h, w = scr.getmaxyx()
+    bw = min(str_w(msg) + 6, w)
+    y, x = max(h // 2 - 1, 0), max((w - bw) // 2, 0)
+    green = curses.color_pair(2) | curses.A_BOLD
+    try:
+        scr.addstr(y, x, "┌" + "─" * (bw - 2) + "┐", green)
+        scr.addstr(y + 1, x, "│", green)
+        scr.addstr(y + 1, x + 1, fit("  " + msg, bw - 2), curses.A_BOLD)
+        scr.addstr(y + 1, x + bw - 1, "│", green)
+        scr.addstr(y + 2, x, "└" + "─" * (bw - 2) + "┘", green)
+    except curses.error:
+        pass
+    scr.refresh()
+    # 先清掉還沒讀的輸入（例如觸控式軌跡板捲動的慣性事件），1.2 秒內只有真正的按鍵能提早關閉，滑鼠事件不算
+    curses.flushinp()
+    deadline = time.monotonic() + 1.2
+    try:
+        while True:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                break
+            scr.timeout(max(int(left * 1000), 1))
+            k = scr.getch()
+            if k == -1:
+                break
+            if k == curses.KEY_MOUSE:
+                try:
+                    curses.getmouse()
+                except curses.error:
+                    pass
+                continue
+            if k != curses.KEY_RESIZE:
+                break
+    finally:
+        scr.timeout(-1)
+    return text
+
+
+MOUSE_DRAG_ON, MOUSE_DRAG_OFF = "\033[?1002h", "\033[?1002l"
+
+
+def _reply_pick(scr, replies, proj, on_copy=None):
+    """複製回覆的選擇畫面（見 _reply_pick_loop）。
+    curses 只開啟「按下／放開」的滑鼠回報（舊版 ncurses 只會用這種），這裡另外要求終端機回報「按著移動」（1002），
+    拖曳時反白才能即時跟著滑鼠；離開時一定關掉，不影響之後的畫面。"""
+    try:
+        return _reply_pick_loop(scr, replies, proj, on_copy)
+    finally:
+        try:
+            sys.stdout.write(MOUSE_DRAG_OFF)
+            sys.stdout.flush()
+        except (OSError, ValueError):
+            pass
+
+
+def _reply_pick_loop(scr, replies, proj, on_copy=None):
+    """複製回覆的選擇畫面：上方清單、下方預覽。按 Esc 關閉時回傳複製了幾次。
+    複製後視窗不關閉（可以接著複製其他段落），底部顯示綠色的「已複製」。
+    預覽中可以只複製其中一段（以「行」為單位，終點在起點上方也可以）：
+      - 拖曳：在預覽中按下、拖到另一行放開；拖曳中反白即時跟著滑鼠，拖到預覽最上／最下一行會自動捲動；
+      - 點擊設起點 → 捲動 → 點擊終點（範圍超過一個畫面時用這個；Shift+點擊也可以）。
+        設好起點後，反白範圍是「起點～終點」：↑↓／PgUp／PgDn 可以調整終點，Enter 複製目前反白的範圍
+        （滾輪只捲動，不改變反白）。不用修飾鍵：Windows Terminal 的 Shift+點擊會被終端機自己攔下。
+    on_copy：選好後呼叫它複製，接著在畫面中央短暫顯示「已複製」。"""
+    copies, note = 0, ""
+    copied = None                               # 剛複製的範圍（預覽中的第幾行～第幾行）：反白標示到下一個操作
+    flash = None                                # 剛複製的內容：畫面重畫（含反白）後再顯示「已複製」框
+
+    def done(lo, hi, text):
+        nonlocal copies, note, mark, end, pressed, copied, flash, held, edge, parked
+        if on_copy:
+            on_copy(text)
+            text = reply_safe(text)
+            note = T("reply_copied_more", n=text.count("\n") + 1)
+            copied, flash = (lo, hi), text
+            copies += 1
+        mark = end = pressed = None
+        # 複製後會短暫顯示「已複製」框，這段時間的滑鼠事件（包括這次點擊的放開）會被丟掉：
+        # 不能留下「按著沒放開」，否則之後的滾輪（舊版 ncurses 的往下＝移動）會被當成拖曳而無法捲動
+        held, edge, parked = False, 0, False
+
+    curses.curs_set(0)
+    wheel_up = curses.BUTTON4_PRESSED
+    wheel_down = getattr(curses, "BUTTON5_PRESSED", curses.REPORT_MOUSE_POSITION)
+    shift = getattr(curses, "BUTTON_SHIFT", 0)
+    motion = curses.REPORT_MOUSE_POSITION
+    old_curses = wheel_down == motion           # 舊版 ncurses：滾輪往下也是「移動」，靠「按著沒放開」區分
+    curses.mousemask(curses.BUTTON1_PRESSED | curses.BUTTON1_RELEASED | wheel_up | wheel_down | shift | motion)
+    curses.mouseinterval(0)
+    try:
+        sys.stdout.write(MOUSE_DRAG_ON)
+        sys.stdout.flush()
+    except (OSError, ValueError):
+        pass
+    held, edge = False, 0                       # 左鍵按著沒放開；拖到預覽最上(-1)／最下(1)一行時自動捲動
+    moved_at = 0.0                              # 最後一次「按著移動」的時間（判斷拖出預覽後的放開是不是剛拖完）
+    parked = False                              # 拖曳中自動捲動已經捲到頭、停在那裡等放開
+    ri, sel = len(replies) - 1, 0
+    top, mark, shown = 0, None, None            # 預覽捲到哪一行、起點（第幾行）、目前預覽的是哪一項
+    pressed = None                              # 在預覽中按下滑鼠的那一行（放開時判斷是不是拖曳）
+    end = None                                  # 有起點時：目前的終點（反白「起點～終點」）
+    while True:
+        items = reply_items(replies[ri])
+        sel = min(sel, len(items) - 1)
+        if shown != (ri, sel):                  # 換了項目：預覽回到最上面、清掉起點與反白
+            top, mark, end, pressed, copied, shown = 0, None, None, None, None, (ri, sel)
+        lines = items[sel][1].split("\n")
+        h, w = scr.getmaxyx()
+        list_top, list_h = 3, min(len(items), max(h // 3, 3))
+        first = max(0, sel - list_h + 1)
+        py = list_top + list_h + 1              # 預覽標題列；內容從下一列開始，最後一列是提示
+        view = max(h - py - 2, 1)
+        max_top = max(len(lines) - view, 0)
+        if mark is not None:
+            end = min(max(end if end is not None else mark, 0), len(lines) - 1)
+        top = min(max(top, 0), max_top)
+        lo_sel, hi_sel = (min(mark, end), max(mark, end)) if mark is not None else (-1, -1)
+        bar_x = w - 2                           # 捲軸所在的欄（內容超過一頁才畫，並讓出右側 3 欄）
+        text_w = w - 3 - (3 if max_top else 0)
+        scr.erase()
+        try:
+            title_bar(scr, T("reply_title", proj=proj, i=ri + 1, n=len(replies)))
+            scr.addstr(1, 1, fit(T("reply_hint"), w - 2), dim_attr())
+            for k in range(list_h):
+                i = first + k
+                if i >= len(items):
+                    break
+                attr = curses.color_pair(9) | curses.A_BOLD if i == sel else 0
+                scr.addstr(list_top + k, 1, fit(("▶ " if i == sel else "  ") + clean_ctrl(items[i][0]), w - 2), attr)
+            more = T("reply_lines", a=top + 1, b=min(top + view, len(lines)), n=len(lines))
+            head = "── " + T("reply_preview") + " " + more + " "
+            scr.addstr(py, 1, fit(head + "─" * max(w - 2 - str_w(head), 0), w - 2), curses.color_pair(4))
+            for k in range(min(view, len(lines) - top)):
+                i = top + k
+                hit = lo_sel <= i <= hi_sel or (copied is not None and copied[0] <= i <= copied[1])
+                attr = curses.color_pair(9) if hit else 0
+                scr.addstr(py + 1 + k, 2, fit(clean_ctrl(lines[i].expandtabs(4)) or " ", text_w), attr)
+            draw_scrollbar(scr, py + 1, bar_x, view, top, max_top, len(lines))
+            if note:
+                scr.addstr(h - 1, 1, fit(note, w - 2), curses.color_pair(2) | curses.A_BOLD)
+            elif mark is not None and held and pressed is not None:
+                add_marked(scr, h - 1, 1, T("reply_dragging", a=lo_sel + 1, b=hi_sel + 1, n=hi_sel - lo_sel + 1), w - 2)
+            elif mark is not None:
+                add_marked(scr, h - 1, 1, T("reply_range_end", a=lo_sel + 1, b=hi_sel + 1, n=hi_sel - lo_sel + 1), w - 2)
+            else:
+                add_marked(scr, h - 1, 1, T("reply_range_hint"), w - 2)
+        except curses.error:
+            pass
+        scr.refresh()
+        if flash is not None:                   # 先畫出反白的複製範圍，再短暫顯示「已複製」框
+            _show_copied(scr, flash)
+            flash = None
+            continue
+        dragging = held and pressed is not None and mark is not None
+        scr.timeout(60 if dragging and edge else -1)   # 停在最上／最下一行時每 0.06 秒捲一行
+        ch = read_key(scr)
+        if ch == -1:
+            if dragging and edge:
+                top = min(max(top + edge, 0), max_top)
+                end = top if edge < 0 else min(top + view - 1, len(lines) - 1)
+                moved_at = time.monotonic()     # 自動捲動中也算「剛剛還在拖曳」
+                if top in (0, max_top):
+                    edge, parked = 0, True      # 已經捲到頭：停止計時重畫，等滑鼠再移動或放開（放開仍算剛拖完）
+            continue
+        if ch not in (curses.KEY_RESIZE, curses.KEY_MOUSE):
+            note, copied = "", None             # 「已複製」與反白顯示到下一個操作為止（滑鼠事件在下面判斷）
+            pressed, held, edge, parked = None, False, 0, False   # 按了鍵盤：之前的按下不再算拖曳
+        if ch == 27 and mark is not None:       # Esc：先取消起點，再按一次才關閉
+            mark = end = pressed = None
+        elif ch in (27, ord("q")):
+            return copies
+        elif mark is not None and ch in (curses.KEY_UP, ord("k"), curses.KEY_DOWN, ord("j"),
+                                         curses.KEY_PPAGE, curses.KEY_NPAGE):
+            # 有起點時：↑↓ 一行一行、PgUp／PgDn 一頁一頁移動終點，預覽跟著捲到終點看得到的位置
+            step = {curses.KEY_UP: -1, ord("k"): -1, curses.KEY_DOWN: 1, ord("j"): 1,
+                    curses.KEY_PPAGE: -view, curses.KEY_NPAGE: view}[ch]
+            end = min(max(end + step, 0), len(lines) - 1)
+            top = min(max(top, end - view + 1), end)
+        elif mark is not None and ch in (10, 13, curses.KEY_ENTER):
+            done(lo_sel, hi_sel, "\n".join(lines[lo_sel:hi_sel + 1]))
+        elif ch in (curses.KEY_UP, ord("k")):
+            sel = (sel - 1) % len(items)
+        elif ch in (curses.KEY_DOWN, ord("j")):
+            sel = (sel + 1) % len(items)
+        elif ch in (curses.KEY_LEFT, ord("h")) and ri > 0:
+            ri, sel = ri - 1, 0
+        elif ch in (curses.KEY_RIGHT, ord("l")) and ri < len(replies) - 1:
+            ri, sel = ri + 1, 0
+        elif ch == curses.KEY_PPAGE:
+            top -= view
+        elif ch == curses.KEY_NPAGE:
+            top += view
+        elif ch in (10, 13, curses.KEY_ENTER):
+            done(0, len(lines) - 1, items[sel][1])
+        elif ch == curses.KEY_MOUSE:
+            try:
+                _, mx, my, _, b = curses.getmouse()
+            except curses.error:
+                continue
+            in_preview = py < my < py + 1 + view
+            if b & motion and (not old_curses or (held and pressed is not None)):
+                # 按著左鍵移動（拖曳中）：終點跟著滑鼠那一行；在預覽最上／最下一行（或更外面）時自動捲動
+                parked = False
+                if held and pressed is not None and mark is not None:
+                    moved_at = time.monotonic()
+                    row = min(max(my, py + 1), py + view)
+                    edge = -1 if my <= py + 1 and top > 0 else 1 if my >= py + view and top < max_top else 0
+                    end = min(top + row - py - 1, len(lines) - 1)
+                continue
+            was_parked, parked = parked, False
+            if b & curses.BUTTON1_RELEASED:
+                held, edge = False, 0
+            elif b & curses.BUTTON1_PRESSED:
+                held = True
+            if not b & curses.BUTTON1_RELEASED:
+                note, copied = "", None         # 單純的放開（例如 Shift+點擊按得比較久）不清掉「已複製」
+            if b & curses.BUTTON1_PRESSED and not b & curses.BUTTON1_RELEASED:
+                # 任何新的按下都先清掉之前的按下（例如拖到視窗外放開、這裡沒收到放開），
+                # 只有在預覽文字上按下時才重新設定，避免之後一次無關的放開被當成拖曳而複製
+                pressed = None
+            if b & (wheel_up | wheel_down):
+                step = -1 if b & wheel_up else 1
+                if my > py:                     # 滾輪在預覽上：捲動預覽；在清單上：換項目
+                    top = min(max(top + 3 * step, 0), max_top)   # 只捲動；反白只有按著左鍵拖曳時才跟著滑鼠
+                else:
+                    sel = min(max(sel + step, 0), len(items) - 1)
+            elif b & curses.BUTTON1_RELEASED:
+                # 拖曳：在預覽的另一行文字上放開 → 複製按下～放開這幾行。
+                # 拖曳中拖出預覽（例如往上／下自動捲動）才放開 → 複製到反白的終點，但只限剛剛還在拖曳
+                # （最後一次移動在 1 秒內）。其他在捲軸、清單、標題或視窗外的放開都當成取消拖曳（只留下起點，可以按 Esc 取消）：
+                # 較舊的 curses 在沒收到放開時，會把下一次按下轉成「放開」，不能讓它誤觸複製
+                start, pressed_at, pressed = mark, pressed, None
+                on_text = in_preview and not (max_top and mx >= bar_x - 1) and top + my - py - 1 < len(lines)
+                recent = time.monotonic() - moved_at < 1.0 or was_parked
+                i = top + my - py - 1 if on_text else end if end != start and recent else None
+                if pressed_at is not None and start is not None and i is not None and i != start:
+                    lo, hi = min(start, i), max(start, i)
+                    done(lo, hi, "\n".join(lines[lo:hi + 1]))
+            elif b & curses.BUTTON1_PRESSED and in_preview and max_top and mx >= bar_x - 1:
+                top = round((my - py - 1) / max(view - 1, 1) * max_top)    # 點捲軸：跳到對應位置
+            elif b & curses.BUTTON1_PRESSED and in_preview and top + my - py - 1 < len(lines):
+                i = top + my - py - 1
+                if mark is not None:            # 已有起點：點擊（或 Shift+點擊）終點 → 複製起點～終點這幾行
+                    lo, hi = min(mark, i), max(mark, i)
+                    done(lo, hi, "\n".join(lines[lo:hi + 1]))
+                else:
+                    mark = end = pressed = i    # 點擊：設起點；拖曳也從這裡開始
+            elif b & curses.BUTTON1_PRESSED and list_top <= my < list_top + list_h and first + my - list_top < len(items):
+                if first + my - list_top == sel:
+                    done(0, len(lines) - 1, items[sel][1])   # 點選已選取的項目 = 複製
+                else:
+                    sel = first + my - list_top
 
 
 def relayout():
@@ -5749,7 +6503,20 @@ def hook_process(agent, data, path, ctx=None, start_pid=0):
                            LAST_DURATION=str(now - start) if start else "")
     if not from_subagent and ev in ("SessionStart", "UserPromptSubmit", "PreInvocation", "Stop"):
         update_agent_info(agent, data, sess, upd)
-    prompt_text = str(data.get("prompt", "") or data.get("userPrompt", "") or data.get("lastUserInput", ""))
+    # 記下 Claude 目前的對話編號：右鍵選單「複製回覆」用它找出這個 Agent 自己的對話紀錄
+    # （同一個資料夾可能同時開了好幾個 Claude，不能只拿最新的紀錄檔）。/clear、重新開始對話時編號會換，下一個事件就會更新
+    # Codex 記在 CODEX_THREAD（不用 AGENT_THREAD：那是共用背景服務時用來找對應 Session 的綁定，不能隨意改）
+    sid = str(data.get("session_id") or (data.get("thread_id") if agent == "codex" else "")
+              or ((data.get("conversationId") or data.get("conversation_id")) if agent == "agy" else "") or "")
+    # Antigravity 的子代理（瀏覽器等）是獨立的對話，帶有上層對話的編號，也沒有 agent_id：不記錄，免得換成子對話的編號。
+    # 只看上層對話編號（不看 rootConversationId：接續或分支出來的主對話也可能有 root，但它就是主對話）
+    if agent == "agy" and (data.get("parentConversationId") or data.get("parent_conversation_id")):
+        sid = ""
+    key = {"claude": "CLAUDE_SID", "codex": "CODEX_THREAD", "agy": "AGY_CONV"}.get(agent)
+    # 帶有 agent_id 的是子代理的事件：不論事件種類都不記錄（避免換成子代理的編號）
+    if key and not from_subagent and not data.get("agent_id") and CLAUDE_SID_RE.fullmatch(sid) and sess.get(key) != sid:
+        upd[key] = sid
+    prompt_text =str(data.get("prompt", "") or data.get("userPrompt", "") or data.get("lastUserInput", ""))
     if resumed:
         # 背景子任務回報、喚醒主任務：不是人類輸入，不當主題、不影響協作組的主責判斷
         from_peer = True
@@ -5860,6 +6627,8 @@ def main():
         start()
     elif cmd == "copy":
         copy_to_clipboard()
+    elif cmd == "copied" and len(sys.argv) >= 3:
+        copied_notice(*sys.argv[2:4])
     elif cmd == "rmenu" and len(sys.argv) >= 5:
         right_menu_prepare(*sys.argv[2:6])
     elif cmd == "menu" and len(sys.argv) >= 5:
@@ -5919,6 +6688,8 @@ def main():
         set_lang(sys.argv[2])
         if has_session():
             apply_ui_lang()
+    elif cmd == "reload-conf":
+        reload_conf()
     elif cmd == "reset-home":
         reset_home()
     elif cmd == "relayout":
@@ -5927,6 +6698,8 @@ def main():
         gc()
     elif cmd == "collab" and len(sys.argv) >= 3:
         collab_ui(sys.argv[2])
+    elif cmd == "reply" and len(sys.argv) >= 3:
+        reply_ui(sys.argv[2], sys.argv[3] if len(sys.argv) >= 4 else "")
     elif cmd == "msgs" and len(sys.argv) >= 3:
         collab_messages(sys.argv[2])
     elif cmd == "topic" and len(sys.argv) >= 3:

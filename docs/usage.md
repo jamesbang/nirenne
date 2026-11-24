@@ -8,7 +8,7 @@
 
 Type `nirenne` to open the manager. The agent list is on the left and the selected agent is on the right. Almost everything can be done with the mouse.
 
-Right-click an agent in the list (or click the ⋮ next to its name) to go to it, set its label, form a party, read its party messages, drink the potion of forgetting, or remove it. You don't have to switch to it first.
+Right-click an agent in the list (or click the ⋮ next to its name) to go to it, set its label, copy its reply, form a party, read its party messages, drink the potion of forgetting, or remove it. You don't have to switch to it first.
 
 When there are many agents, or the terminal window is short, the list switches to a compact layout. If it still doesn't fit, scroll with the mouse wheel or click ▲ / ▼. Agents that are scrolled out of view are highlighted in yellow when they are waiting for you.
 
@@ -67,7 +67,8 @@ nirenne stop     # stop the manager and every agent in it (asks first)
 
 A few more details:
 
-- The right-click menu has Go to, Set label, Form party, Party messages, Drink the potion of forgetting, and Remove. You don't need to switch first. For example, while you are in agent 1 you can right-click agent 6 and close it.
+- The right-click menu has Go to, Set label, Copy reply, Form party, Party messages, Drink the potion of forgetting, and Remove. You don't need to switch first. For example, while you are in agent 1 you can right-click agent 6 and close it.
+- Copy reply (Claude, Codex, Grok and Antigravity) lists the agent's latest reply and each code block in it; pick one to copy the original text. Use ←→ to go to earlier replies. To copy just part of it, drag in the preview, or click the first line, scroll, then click the last line. The copied lines are highlighted and the window stays open, so you can copy more; press Esc to close it. This is the easiest way to copy long output such as SQL from Claude Code.
 - The potion of forgetting only works for an agent in a party. The agent starts over with a fresh conversation and forgets its old conversation and partners. Messages from earlier parties go into an archive; the current party's messages are kept.
 - If your terminal catches the right-click and shows its own menu, click the ⋮ instead.
 - Labels are only shown on screen and never sent to the agent. Clear the label and press Enter to go back to the automatic topic.
@@ -91,7 +92,7 @@ A few more details:
 ## Other controls
 
 - Scroll up with the mouse wheel to see an agent's earlier output. Claude Code, Codex, Antigravity and Grok handle scrolling themselves. On the home screen and in Gemini, the bottom-right corner shows how many lines you have scrolled up; click the screen, press `q`, or scroll back to the bottom to return.
-- Drag with the mouse to select text. It is copied to the clipboard when you let go.
+- Drag with the mouse to select text. It is copied to the clipboard when you let go, and a confirmation shows at the bottom right. Hold the pointer on the top or bottom line of the pane to scroll while selecting.
 - To use your terminal's own selection instead, hold Shift while dragging in Windows Terminal, or Option in iTerm2.
 - To paste, press Shift + right-click, or Ctrl+V (Windows) / Cmd+V (macOS). A plain right-click in the manager doesn't paste; hold Shift.
 - If an agent exits (for example, you pressed Ctrl+C by mistake), its window doesn't close right away. You are asked to press `y` to remove it or `r` to restart it. If you restart it, Claude picks up the conversation it was in.
@@ -158,9 +159,7 @@ git pull
 ./install.sh
 ```
 
-A running manager switches to the new version by itself within a few seconds (the sidebar and party proxies), without interrupting your agents.
-
-Only changes to the tmux settings (keys, status bar, right-click menu) need a restart: run `nirenne stop`, then `nirenne`. ⚠️ `nirenne stop` ends every agent, so make sure nothing is in progress. Versions that need this say so in the update notes of the changelog.
+A running manager switches to the new version by itself, including the sidebar, party proxies, keys, status bar and right-click menu. You don't need to restart it, and your agents keep running.
 
 ### What the installer changes
 

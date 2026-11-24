@@ -66,7 +66,7 @@ agent-run() {
   fi
 
   if ! _agent_manager_has_cmd "$cmd"; then
-    _agent_manager_say "找不到 CLI：$cmd。請確認已安裝，或調整 Agent 指令對照。" \
+    _agent_manager_say "找不到 CLI：${cmd}。請確認已安裝，或調整 Agent 指令對照。" \
       "CLI not found: $cmd. Make sure it is installed." >&2
     return 127
   fi

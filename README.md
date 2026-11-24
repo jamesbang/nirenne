@@ -15,6 +15,7 @@ The problem it solves: with many terminal tabs open, it is hard to tell which ta
 - **Many agents, one screen**: click an agent in the sidebar to switch, or right-click it for a menu. With many agents, the list turns compact and scrolls.
 - **Knows who is waiting for you**: each agent reports through its official hooks. Finished agents show ✅, agents that need your approval show ✋, and a Windows, macOS or Linux notification pops up.
 - **See what each agent is doing**: project, Git branch, task topic, time spent, and the current version and model.
+- **Copy reply**: right-click an agent and choose Copy reply to copy its reply, or a code block from it, as the original text, or just part of it. No more drag-selecting long SQL or code (Claude, Codex, Grok and Antigravity).
 - **Keeps running in the background**: closing the terminal doesn't stop anything. Type `nirenne` to come back.
 - **Parties**: pair two Claude agents so they message each other to get a job done. Each one can change only its own project ([details](docs/party.md)).
 - **Hard to close by accident**: closing an agent always asks first, and an agent that exits by mistake can be restarted.

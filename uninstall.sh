@@ -18,11 +18,10 @@ say() { if [ -n "$AM_EN" ]; then printf '%s\n' "$2"; else printf '%s\n' "$1"; fi
 # 1. 管理畫面若還在執行，先詢問是否結束
 if command -v tmux >/dev/null 2>&1 && tmux -L "${AGENTS_TMUX_SOCKET:-agents}" has-session -t agents 2>/dev/null; then
   read -r -p "$(say "管理畫面（nirenne）仍在執行，要結束其中所有 Agent 嗎？(y/N) " "The manager (nirenne) is still running. End every agent in it? (y/N) ")" a || a=""
-  if [ "$a" = "y" ] || [ "$a" = "Y" ]; then
-    tmux -L "${AGENTS_TMUX_SOCKET:-agents}" kill-server
-  else
-    say "已取消。請先結束管理畫面再移除。" "Cancelled. Stop the manager before uninstalling."; exit 1
-  fi
+  case "$a" in      # 全形 ｙ 也算（中文輸入法開著時）；不呼叫 agents.py：移除時它可能已經壞掉
+    y|Y|ｙ|Ｙ) tmux -L "${AGENTS_TMUX_SOCKET:-agents}" kill-server ;;
+    *) say "已取消。請先結束管理畫面再移除。" "Cancelled. Stop the manager before uninstalling."; exit 1 ;;
+  esac
 fi
 
 # 2. 從 shell 設定檔移除載入區塊（先備份，且確認起訖標記成對且順序正確才移除，避免誤刪後續設定）
@@ -30,7 +29,7 @@ for RC in "$HOME/.bashrc" "$HOME/.zshrc"; do
   [ -f "$RC" ] || continue
   if grep -qx "# >>> nirenne >>>" "$RC"; then
     if awk '/^# >>> nirenne >>>$/{if (s) exit 1; s=1; f=1; next} /^# <<< nirenne <<<$/{if (!s) exit 1; s=0; next} END{if (!f || s) exit 1}' "$RC"; then
-      REAL_RC="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$RC")"
+      REAL_RC="$(python3 -I -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$RC")"
       cp -p "$REAL_RC" "$RC.bak-$(date +%Y%m%d-%H%M%S)"
       cp -p "$REAL_RC" "$REAL_RC.tmp.$$"
       if awk '/^# >>> nirenne >>>$/{skip=1} !skip{print} /^# <<< nirenne <<<$/{skip=0}' "$REAL_RC" > "$REAL_RC.tmp.$$"; then
@@ -47,7 +46,7 @@ for RC in "$HOME/.bashrc" "$HOME/.zshrc"; do
 done
 
 # 3. 從 Claude / Codex / Gemini 設定移除 hooks（先備份，並保留符號連結與檔案權限）
-python3 - <<'PY'
+python3 -I - <<'PY'
 import json, os, shutil, stat, time
 import re as _re
 # 本工具 hook 的固定格式（install.sh 產生）：只有完全符合的才當成本工具的 hook 刪除

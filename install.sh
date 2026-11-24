@@ -31,7 +31,7 @@ while [ "$#" -gt 0 ]; do
 done
 case "$LANG_OPT" in
   ""|en|zh-TW) ;;
-  *) echo "Unsupported language: $LANG_OPT (use en or zh-TW) / 不支援的語言：$LANG_OPT（請用 en 或 zh-TW）" >&2; exit 2 ;;
+  *) echo "Unsupported language: $LANG_OPT (use en or zh-TW) / 不支援的語言：${LANG_OPT}（請用 en 或 zh-TW）" >&2; exit 2 ;;
 esac
 
 # 衝突檢查須在複製程式、修改設定之前完成；這裡只查詢語言、不寫入任何檔案。
@@ -55,9 +55,12 @@ for name in nirenne agents; do
     continue
   fi
   ENTRY_NAMES="$ENTRY_NAMES $name"
+  SEEN=$'\n'      # 已經提醒過的路徑（PATH 裡同一個資料夾出現兩次時，type -a 會列出同一個路徑兩次）
   while IFS= read -r entry; do
     [ "$entry" = "$BIN_DIR/$name" ] && continue
-    say "⚠️  發現另一個同名指令：$entry。安裝後執行 type -a $name 可確認指令順序。" \
+    case "$SEEN" in *$'\n'"$entry"$'\n'*) continue ;; esac
+    SEEN="$SEEN$entry"$'\n'
+    say "⚠️  發現另一個同名指令：${entry}。安裝後執行 type -a $name 可確認指令順序。" \
         "⚠️  Another $name command was found: $entry. Run type -a $name after installation to check command precedence."
   done < <(type -a -p "$name" 2>/dev/null || true)
 done
@@ -101,6 +104,9 @@ if [ -n "$LANG_OPT" ]; then
 else
   AGENT_MANAGER_HOME="$DATA_DIR" python3 -I "$CONF_DIR/agents.py" init-lang >/dev/null 2>&1 || true
 fi
+# 管理畫面開著時（從舊版更新）：立即套用新的 tmux 設定（右鍵選單、快速鍵、狀態列）並重新套用介面語言，
+# 不必重開、Agent 不中斷；程式本身（左側清單、組隊的代理程式）會在幾秒內自動換成新版
+AGENT_MANAGER_HOME="$DATA_DIR" python3 -I "$CONF_DIR/agents.py" reload-conf >/dev/null 2>&1 || true
 if grep -qs '^UI_LANG=en$' "$DATA_DIR/config"; then export AM_EN=1; else export AM_EN=""; fi
 say() { if [ -n "$AM_EN" ]; then printf '%s\n' "$2"; else printf '%s\n' "$1"; fi; }
 
@@ -141,7 +147,7 @@ fi
 #   $8 逾時（各 Agent 單位不同：Claude／Codex 是秒，Gemini 是毫秒）  $9／$10 加入成功後的附註（中文／英文，可省略）
 register_hooks() {
 AM_LABEL="$1" AM_PATH="$2" AM_SUB="$3" AM_STYLE="$4" AM_EVENTS="$5" AM_MATCHER="$6" AM_FALLBACK="$7" \
-AM_TIMEOUT="$8" AM_NOTE_ZH="${9:-}" AM_NOTE_EN="${10:-}" python3 - <<'PY'
+AM_TIMEOUT="$8" AM_NOTE_ZH="${9:-}" AM_NOTE_EN="${10:-}" python3 -I - <<'PY'
 import json, os, shutil, stat, sys, time
 import re as _re
 # 本工具 hook 的固定格式（install.sh 產生）：只有完全符合的才當成本工具的 hook 處理
