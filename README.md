@@ -43,6 +43,17 @@ No WSL yet, or new to the command line? Follow the [step-by-step Windows guide](
 
 ### macOS
 
+With [Homebrew](https://brew.sh/), after installing an AI agent (for example Claude Code) and running it once to log in:
+
+```bash
+brew install jamesbang/tap/nirenne
+nirenne-setup
+source ~/.zshrc
+nirenne
+```
+
+Or install from source:
+
 1. Install [Homebrew](https://brew.sh/), then run `brew install git tmux python`
 2. Install an AI agent (for example Claude Code) and run it once to log in
 3. Install this tool:
@@ -118,6 +129,13 @@ For every key and control, using agents without the manager, and customizing, se
 ```bash
 cd ~/nirenne && git pull && ./install.sh    # update to a new version
 cd ~/nirenne && ./uninstall.sh              # uninstall
+```
+
+Installed with Homebrew:
+
+```bash
+brew upgrade nirenne && nirenne-setup                 # update to a new version
+nirenne-uninstall && brew uninstall nirenne           # uninstall
 ```
 
 `nirenne --version` shows the installed version. For update details and what the installer changes, see [Usage](docs/usage.md#updating-and-uninstalling).

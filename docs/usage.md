@@ -159,6 +159,8 @@ git pull
 ./install.sh
 ```
 
+Installed with Homebrew: run `brew upgrade nirenne`, then `nirenne-setup`.
+
 A running manager switches to the new version by itself, including the sidebar, party proxies, keys, status bar and right-click menu. You don't need to restart it, and your agents keep running.
 
 ### What the installer changes
@@ -182,6 +184,8 @@ The manager uses its own tmux socket (`agents`) and its own settings file, so yo
 cd ~/nirenne
 ./uninstall.sh
 ```
+
+Installed with Homebrew: run `nirenne-uninstall`, then `brew uninstall nirenne`.
 
 The uninstaller:
 

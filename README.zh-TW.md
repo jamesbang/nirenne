@@ -43,6 +43,17 @@ nirenne
 
 ### macOS
 
+已經有 [Homebrew](https://brew.sh/)，並安裝好 AI Agent（例如 Claude Code）、執行過一次完成登入的話：
+
+```bash
+brew install jamesbang/tap/nirenne
+nirenne-setup
+source ~/.zshrc
+nirenne
+```
+
+也可以從原始碼安裝：
+
 1. 安裝 [Homebrew](https://brew.sh/)，再執行 `brew install git tmux python`
 2. 安裝 AI Agent（例如 Claude Code），並先執行一次完成登入
 3. 安裝本工具：
@@ -118,6 +129,13 @@ nirenne stop     # 結束管理畫面與其中所有 Agent（會先確認）
 ```bash
 cd ~/nirenne && git pull && ./install.sh    # 更新到新版
 cd ~/nirenne && ./uninstall.sh              # 移除
+```
+
+用 Homebrew 安裝的話：
+
+```bash
+brew upgrade nirenne && nirenne-setup                 # 更新到新版
+nirenne-uninstall && brew uninstall nirenne           # 移除
 ```
 
 `nirenne --version` 可以查看目前的版本。更新的細節與安裝會修改哪些檔案，請看[使用說明](docs/usage.zh-TW.md#更新與移除)。

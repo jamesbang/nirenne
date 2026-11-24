@@ -159,6 +159,8 @@ git pull
 ./install.sh
 ```
 
+用 Homebrew 安裝的話：先執行 `brew upgrade nirenne`，再執行 `nirenne-setup`。
+
 執行中的管理畫面會自動換成新版，包括左側清單、組隊的代理程式、快速鍵、狀態列和右鍵選單，不必重新開啟，Agent 也不會中斷。
 
 ### 安裝會修改哪些檔案
@@ -182,6 +184,8 @@ git pull
 cd ~/nirenne
 ./uninstall.sh
 ```
+
+用 Homebrew 安裝的話：先執行 `nirenne-uninstall`，再執行 `brew uninstall nirenne`。
 
 移除時會：
 
